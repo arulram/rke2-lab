@@ -1,0 +1,149 @@
+---
+- name: Ensure manifest download directory exists
+  ansible.builtin.file:
+    path: "{{ local_path_provisioner_manifest_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download pinned Local Path Provisioner manifest
+  ansible.builtin.get_url:
+    url: "{{ local_path_provisioner_manifest_url }}"
+    dest: "{{ local_path_provisioner_manifest_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate_certs: true
+
+- name: Apply Local Path Provisioner manifest
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - apply
+      - -f
+      - "{{ local_path_provisioner_manifest_path }}"
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  register: local_path_apply_result
+  changed_when: "'unchanged' not in local_path_apply_result.stdout"
+
+- name: Retrieve current Local Path StorageClass
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - get
+      - storageclass
+      - "{{ local_path_storageclass }}"
+      - -o
+      - json
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  register: local_path_storageclass_before
+  changed_when: false
+
+- name: Read current default StorageClass annotation
+  ansible.builtin.set_fact:
+    local_path_default_annotation: >-
+      {{
+        (local_path_storageclass_before.stdout | from_json).metadata.annotations
+        | default({})
+      }}
+
+- name: Retrieve all StorageClasses
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - get
+      - storageclasses
+      - -o
+      - json
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  register: local_path_all_storageclasses
+  changed_when: false
+
+- name: Verify no other StorageClass is marked as default
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          item.metadata.annotations | default({})
+          | dict2items
+          | selectattr(
+              'key',
+              'equalto',
+              'storageclass.kubernetes.io/is-default-class'
+            )
+          | selectattr('value', 'equalto', 'true')
+          | list
+          | length
+        ) == 0
+    fail_msg: >-
+      Another StorageClass is already marked as default.
+      Resolve the existing default before installing Local Path Provisioner.
+  loop: >-
+    {{
+      (local_path_all_storageclasses.stdout | from_json)['items']
+      | rejectattr('metadata.name', 'equalto', local_path_storageclass)
+      | list
+    }}
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: Mark Local Path StorageClass as default
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - annotate
+      - storageclass
+      - "{{ local_path_storageclass }}"
+      - storageclass.kubernetes.io/is-default-class=true
+      - --overwrite
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  when: >-
+    local_path_default_annotation.get(
+      'storageclass.kubernetes.io/is-default-class', ''
+    ) != 'true'
+
+
+- name: Wait for Local Path Provisioner deployment
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - rollout
+      - status
+      - "deployment/{{ local_path_provisioner_deployment }}"
+      - -n
+      - "{{ local_path_provisioner_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  changed_when: false
+
+- name: Retrieve Local Path StorageClass
+  ansible.builtin.command:
+    argv:
+      - "{{ rke2_kubectl_path }}"
+      - get
+      - storageclass
+      - "{{ local_path_storageclass }}"
+      - -o
+      - json
+  environment:
+    KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+  register: local_path_storageclass_result
+  changed_when: false
+
+- name: Verify Local Path StorageClass is the default
+  ansible.builtin.assert:
+    that:
+      - >-
+        (local_path_storageclass_result.stdout | from_json)
+        .metadata.annotations['storageclass.kubernetes.io/is-default-class']
+        == 'true'
+    fail_msg: >-
+      Local Path StorageClass exists but is not configured as the
+      default StorageClass.
+    success_msg: "Local Path StorageClass is installed and is the default."

@@ -1,0 +1,12 @@
+---
+- name: Install RKE2 server
+  hosts: rke2_servers
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/rke2_cluster/vault.yml
+
+  roles:
+    - rke2_server

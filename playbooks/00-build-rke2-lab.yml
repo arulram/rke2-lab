@@ -1,0 +1,29 @@
+---
+# Master playbook for a complete RKE2 lab build.
+#
+# Run from the repository root:
+# ansible-playbook playbooks/00-build-rke2-lab.yml --ask-vault-pass
+#
+# Each imported playbook must complete before Ansible proceeds
+# to the next playbook. A failure stops the build.
+
+- name: Provision Multipass virtual machines
+  ansible.builtin.import_playbook: 00-provision-multipass-vms.yml
+
+- name: Prepare Linux nodes
+  ansible.builtin.import_playbook: 01-prepare-nodes.yml
+
+- name: Install RKE2 server
+  ansible.builtin.import_playbook: 02-install-rke2-server.yml
+
+- name: Join RKE2 worker nodes
+  ansible.builtin.import_playbook: 03-join-rke2-workers.yml
+
+- name: Validate RKE2 cluster
+  ansible.builtin.import_playbook: 04-validate-rke2-cluster.yml
+
+- name: Configure host kubectl access
+  ansible.builtin.import_playbook: 05-configure-desktop-kubeconfig.yml
+
+- name: Install Local Path Provisioner
+  ansible.builtin.import_playbook: 06-install-local-path-storage.yml

@@ -1,0 +1,11 @@
+---
+- name: Install Local Path Provisioner
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+
+  vars_files:
+  - ../group_vars/all.yml
+
+  roles:
+    - local_path_storage

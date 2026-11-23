@@ -1,0 +1,149 @@
+---
+- name: Destroy only the RKE2 lab Multipass VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    required_destroy_confirmation: "DESTROY_RKE2_LAB_VMS"
+    expected_lab_vm_names: "{{ multipass_vm_definitions | map(attribute='name') | list }}"
+
+  tasks:
+    - name: Require explicit destruction confirmation
+      ansible.builtin.assert:
+        that:
+          - >-
+            confirm_destroy_rke2_lab | default('')
+            == required_destroy_confirmation
+        fail_msg: >-
+          Destruction blocked.
+          Explicit confirmation is required:
+          -e confirm_destroy_rke2_lab=DESTROY_RKE2_LAB_VMS
+
+    - name: Retrieve current Multipass VM inventory
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - list
+          - --format
+          - json
+      register: multipass_destroy_inventory
+      changed_when: false
+
+    - name: Identify existing RKE2 lab VMs
+      ansible.builtin.set_fact:
+        multipass_destroy_targets: >-
+          {{
+            (multipass_destroy_inventory.stdout | from_json).list
+            | selectattr('name', 'in', expected_lab_vm_names)
+            | list
+          }}
+
+    - name: Verify target VM states are supported
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              multipass_destroy_targets
+              | map(attribute='state')
+              | difference(['Running', 'Stopped'])
+              | length
+            ) == 0
+        fail_msg: >-
+          Destruction aborted. A target VM is in an unexpected state.
+          Inspect multipass list before proceeding.
+
+    - name: Display VMs targeted for destruction
+      ansible.builtin.debug:
+        msg: >-
+          Only these existing RKE2 lab VMs will be deleted:
+          {{ multipass_destroy_targets | map(attribute='name') | list }}
+
+    - name: Stop running lab VMs gracefully
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - stop
+          - "{{ item.name }}"
+      loop: >-
+        {{
+          multipass_destroy_targets
+          | selectattr('state', 'equalto', 'Running')
+          | list
+        }}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Retrieve VM inventory after shutdown
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - list
+          - --format
+          - json
+      register: multipass_stopped_inventory
+      changed_when: false
+
+    - name: Identify remaining RKE2 lab VMs
+      ansible.builtin.set_fact:
+        multipass_stopped_targets: >-
+          {{
+            (multipass_stopped_inventory.stdout | from_json).list
+            | selectattr('name', 'in', expected_lab_vm_names)
+            | list
+          }}
+
+    - name: Verify all remaining target VMs are stopped
+      ansible.builtin.assert:
+        that:
+          - >-
+            multipass_stopped_targets | length
+            == multipass_destroy_targets | length
+          - >-
+            (
+              multipass_stopped_targets
+              | selectattr('state', 'equalto', 'Stopped')
+              | list
+              | length
+            ) == multipass_destroy_targets | length
+        fail_msg: >-
+          Destruction aborted. The existing lab VMs were not all confirmed
+          stopped. No VM has been permanently deleted.
+
+    - name: Permanently delete existing RKE2 lab VMs
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - delete
+          - --purge
+          - "{{ item.name }}"
+      loop: "{{ multipass_stopped_targets }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Retrieve Multipass inventory after destruction
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - list
+          - --format
+          - json
+      register: multipass_destroy_final_inventory
+      changed_when: false
+
+    - name: Verify all RKE2 lab VMs are absent
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              (multipass_destroy_final_inventory.stdout | from_json).list
+              | map(attribute='name')
+              | intersect(expected_lab_vm_names)
+              | length
+            ) == 0
+        fail_msg: "One or more RKE2 lab VMs still exist."
+        success_msg: >-
+          All existing RKE2 lab VMs have been permanently deleted.

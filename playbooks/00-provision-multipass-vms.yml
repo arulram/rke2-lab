@@ -1,0 +1,108 @@
+---
+- name: Provision RKE2 lab Multipass VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  roles:
+    - multipass_provision
+
+  post_tasks:
+    - name: Refresh dynamic Multipass inventory
+      ansible.builtin.meta: refresh_inventory
+
+- name: Register SSH host keys for RKE2 lab VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Retrieve ED25519 host public keys through Multipass
+      ansible.builtin.command:
+        argv:
+          - multipass
+          - exec
+          - "{{ item }}"
+          - --
+          - sudo
+          - cat
+          - /etc/ssh/ssh_host_ed25519_key.pub
+      loop: "{{ groups['rke2_cluster'] }}"
+      register: multipass_ssh_host_keys
+      changed_when: false
+
+    - name: Validate retrieved ED25519 host public keys
+      ansible.builtin.assert:
+        that:
+          - item.stdout is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,3}( .*)?$')
+        fail_msg: >-
+          Could not retrieve a valid ED25519 SSH host public key
+          for {{ item.item }}.
+      loop: "{{ multipass_ssh_host_keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Register VM host keys in the desktop known_hosts file
+      ansible.builtin.known_hosts:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/known_hosts"
+        name: "{{ hostvars[item.item].ansible_host }}"
+        key: "{{ hostvars[item.item].ansible_host }} {{ item.stdout }}"
+        state: present
+      loop: "{{ multipass_ssh_host_keys.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Validate SSH connectivity to provisioned VMs
+  hosts: rke2_cluster
+  gather_facts: false
+
+  pre_tasks:
+    - name: Verify all expected VMs are present in dynamic inventory
+      ansible.builtin.assert:
+        that:
+          - groups['rke2_servers'] | length == 1
+          - groups['rke2_agents'] | length == 3
+          - groups['rke2_cluster'] | length == 4
+        fail_msg: >-
+          Provisioning validation aborted. Expected one server and
+          three agents in dynamic inventory. Check Multipass VM
+          states, IP addresses, and the configured inventory subnet.
+
+    - name: Verify VM SSH host key exists in desktop known_hosts
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -F
+          - "{{ ansible_host }}"
+          - -f
+          - "{{ lookup('env', 'HOME') }}/.ssh/known_hosts"
+      delegate_to: localhost
+      register: ssh_known_hosts_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert VM SSH host key is registered
+      ansible.builtin.assert:
+        that:
+          - ssh_known_hosts_check.rc == 0
+        fail_msg: >-
+          SSH host key for {{ inventory_hostname }}
+          ({{ ansible_host }}) is missing from the desktop
+          known_hosts file. SSH connectivity validation aborted.
+        success_msg: >-
+          SSH host key for {{ inventory_hostname }}
+          is present in the desktop known_hosts file.
+
+    - name: Wait for SSH connectivity
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        connect_timeout: 10
+        timeout: 300
+
+  tasks:
+    - name: Verify Ansible SSH connectivity
+      ansible.builtin.ping:

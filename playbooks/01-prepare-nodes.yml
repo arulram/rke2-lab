@@ -1,0 +1,140 @@
+---
+- name: Prepare and validate Linux prerequisites on RKE2 nodes
+  hosts: rke2_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Verify supported operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "This lab currently supports Ubuntu 24.04 only."
+        success_msg: "Operating system validation passed."
+
+    - name: Check swap status
+      ansible.builtin.command: swapon --noheadings
+      register: swap_status
+      changed_when: false
+
+    - name: Verify swap is disabled
+      ansible.builtin.assert:
+        that:
+          - swap_status.stdout | trim == ""
+        fail_msg: "Swap is enabled on this node."
+        success_msg: "Swap is disabled."
+
+    - name: Persist required kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/rke2.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Load required kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Check OverlayFS module availability
+      ansible.builtin.stat:
+        path: /sys/module/overlay
+      register: overlay_module
+
+    - name: Check br_netfilter module availability
+      ansible.builtin.stat:
+        path: /sys/module/br_netfilter
+      register: br_netfilter_module
+
+    - name: Verify required kernel modules
+      ansible.builtin.assert:
+        that:
+          - overlay_module.stat.exists
+          - br_netfilter_module.stat.exists
+        fail_msg: "One or more required kernel modules are not loaded."
+
+    - name: Check OverlayFS filesystem support
+      ansible.builtin.command: grep -w overlay /proc/filesystems
+      register: overlay_filesystem
+      changed_when: false
+
+    - name: Verify OverlayFS filesystem support
+      ansible.builtin.assert:
+        that:
+          - overlay_filesystem.rc == 0
+        fail_msg: "OverlayFS filesystem support is unavailable."
+
+    - name: Persist Kubernetes networking sysctls
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/90-rke2-network.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Kubernetes networking sysctls
+      ansible.builtin.command: sysctl -p /etc/sysctl.d/90-rke2-network.conf
+      register: sysctl_apply
+      changed_when: false
+
+    - name: Check IPv4 forwarding
+      ansible.builtin.command: sysctl -n net.ipv4.ip_forward
+      register: ip_forward
+      changed_when: false
+
+    - name: Verify IPv4 forwarding
+      ansible.builtin.assert:
+        that:
+          - ip_forward.stdout | trim == "1"
+        fail_msg: "IPv4 forwarding is disabled."
+
+    - name: Check bridge iptables setting
+      ansible.builtin.command: sysctl -n net.bridge.bridge-nf-call-iptables
+      register: bridge_iptables
+      changed_when: false
+
+    - name: Verify bridge iptables setting
+      ansible.builtin.assert:
+        that:
+          - bridge_iptables.stdout | trim == "1"
+        fail_msg: "Bridge iptables filtering is disabled."
+
+    - name: Check bridge ip6tables setting
+      ansible.builtin.command: sysctl -n net.bridge.bridge-nf-call-ip6tables
+      register: bridge_ip6tables
+      changed_when: false
+
+    - name: Verify bridge ip6tables setting
+      ansible.builtin.assert:
+        that:
+          - bridge_ip6tables.stdout | trim == "1"
+        fail_msg: "Bridge IPv6 iptables filtering is disabled."
+
+    - name: Check available root filesystem space
+      ansible.builtin.command: df -PB1 /
+      register: root_disk
+      changed_when: false
+
+    - name: Display node preparation summary
+      ansible.builtin.debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Swap: disabled"
+          - "OverlayFS: available"
+          - "br_netfilter: loaded"
+          - "IPv4 forwarding: enabled"
+          - "Bridge iptables: enabled"
+          - "Bridge IPv6 iptables: enabled"
+          - "Root filesystem: {{ root_disk.stdout_lines[1] }}"

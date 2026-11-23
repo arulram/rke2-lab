@@ -1,0 +1,56 @@
+---
+- name: Retrieve secure RKE2 agent token
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+
+  vars_files:
+  - ../group_vars/all.yml
+
+  pre_tasks:
+    - name: Verify expected RKE2 cluster inventory
+      ansible.builtin.assert:
+        that:
+          - groups['rke2_servers'] | length == 1
+          - groups['rke2_agents'] | length == 3
+          - groups['rke2_cluster'] | length == 4
+        fail_msg: >-
+          Worker installation aborted. Expected one RKE2 server
+          and three RKE2 agents in the inventory.
+
+  tasks:
+    - name: Wait for secure agent token file
+      ansible.builtin.wait_for:
+        path: "{{ rke2_agent_token_file }}"
+        timeout: 120
+
+    - name: Read secure agent token
+      ansible.builtin.slurp:
+        src: "{{ rke2_agent_token_file }}"
+      register: rke2_secure_token_result
+      no_log: true
+
+    - name: Store secure agent token as a host fact
+      ansible.builtin.set_fact:
+        rke2_agent_token_secure: "{{ rke2_secure_token_result.content | b64decode | trim }}"
+      no_log: true
+
+    - name: Validate secure agent token
+      ansible.builtin.assert:
+        that:
+          - rke2_agent_token_secure is defined
+          - rke2_agent_token_secure | length > 64
+          - rke2_agent_token_secure.startswith('K10')
+        fail_msg: "Secure RKE2 agent token validation failed."
+      no_log: true
+
+- name: Install and register RKE2 workers
+  hosts: rke2_agents
+  become: true
+  gather_facts: true
+
+  vars_files:
+  - ../group_vars/all.yml
+
+  roles:
+    - rke2_agent

@@ -1,0 +1,12 @@
+#cloud-config
+
+users:
+  - default
+
+ssh_authorized_keys:
+  - {{ multipass_ssh_public_key }}
+
+ssh_pwauth: false
+disable_root: true
+
+package_update: true

@@ -1,0 +1,104 @@
+---
+- name: Verify exactly one RKE2 server is defined
+  ansible.builtin.assert:
+    that:
+      - groups[rke2_server_group] | length == 1
+
+- name: Verify secure agent token is available
+  ansible.builtin.assert:
+    that:
+      - hostvars[groups[rke2_server_group][0]].rke2_agent_token_secure is defined
+      - hostvars[groups[rke2_server_group][0]].rke2_agent_token_secure | length > 64
+    fail_msg: "Secure agent token is unavailable. Retrieve it from the server first."
+  no_log: true
+
+- name: Check whether RKE2 binary already exists
+  ansible.builtin.stat:
+    path: "{{ rke2_binary_path }}"
+  register: rke2_binary_status
+
+- name: Check whether RKE2 agent service unit exists
+  ansible.builtin.stat:
+    path: "{{ rke2_agent_unit_path }}"
+  register: rke2_agent_unit_status
+
+- name: Check whether RKE2 data directory exists
+  ansible.builtin.stat:
+    path: "{{ rke2_data_dir }}"
+  register: rke2_data_status
+
+- name: Refuse installation on an existing RKE2 worker
+  ansible.builtin.assert:
+    that:
+      - not rke2_binary_status.stat.exists
+      - not rke2_agent_unit_status.stat.exists
+      - not rke2_data_status.stat.exists
+    fail_msg: >-
+      Existing RKE2 installation or data detected.
+      Worker installation aborted to protect the existing node.
+
+- name: Ensure curl is installed
+  ansible.builtin.apt:
+    name: curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create RKE2 installer directory
+  ansible.builtin.file:
+    path: "{{ rke2_install_script_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download official RKE2 installation script
+  ansible.builtin.get_url:
+    url: "{{ rke2_install_script_url }}"
+    dest: "{{ rke2_install_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    validate_certs: true
+
+- name: Create RKE2 configuration directory
+  ansible.builtin.file:
+    path: "{{ rke2_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configure RKE2 worker
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ rke2_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Install pinned RKE2 agent version
+  ansible.builtin.command:
+    cmd: "sh {{ rke2_install_script_path }}"
+  environment:
+    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
+    INSTALL_RKE2_TYPE: "{{ rke2_agent_install_type }}"
+    INSTALL_RKE2_METHOD: "{{ rke2_install_method }}"
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Enable and start RKE2 agent
+  ansible.builtin.systemd_service:
+    name: "{{ rke2_agent_service }}"
+    enabled: true
+    state: started
+
+- name: Verify RKE2 agent service is active
+  ansible.builtin.command:
+    cmd: systemctl is-active rke2-agent
+  register: rke2_agent_service_status
+  changed_when: false
+  failed_when: rke2_agent_service_status.stdout != "active"

@@ -1,0 +1,3 @@
+---
+server: "https://{{ hostvars[groups[rke2_server_group][0]].ansible_host }}:{{ rke2_registration_port }}"
+token: "{{ hostvars[groups[rke2_server_group][0]].rke2_agent_token_secure }}"

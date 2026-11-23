@@ -1,0 +1,161 @@
+---
+- name: Check Multipass availability
+  ansible.builtin.command:
+    argv:
+      - multipass
+      - version
+  register: multipass_version_result
+  changed_when: false
+
+- name: Retrieve existing Multipass VM list
+  ansible.builtin.command:
+    argv:
+      - multipass
+      - list
+      - --format
+      - json
+  register: multipass_list_result
+  changed_when: false
+
+- name: Identify existing VM names
+  ansible.builtin.set_fact:
+    multipass_existing_names: >-
+      {{
+        (multipass_list_result.stdout | from_json).list
+        | map(attribute='name')
+        | list
+      }}
+
+- name: Identify conflicting VM names
+  ansible.builtin.set_fact:
+    multipass_conflicting_vm_names: >-
+      {{
+        (multipass_vm_definitions | map(attribute='name') | list)
+        | intersect(multipass_existing_names)
+      }}
+
+- name: Refuse to overwrite existing Multipass VMs
+  ansible.builtin.assert:
+    that:
+      - multipass_conflicting_vm_names | length == 0
+    fail_msg: >-
+      VM provisioning aborted. These target VM names already exist:
+      {{ multipass_conflicting_vm_names }}.
+      Existing VMs will not be modified or deleted.
+    success_msg: "All target VM names are available."
+
+- name: Check dedicated SSH public key exists
+  ansible.builtin.stat:
+    path: "{{ multipass_ssh_public_key_path }}"
+  register: multipass_ssh_public_key_status
+
+- name: Validate dedicated SSH public key file
+  ansible.builtin.assert:
+    that:
+      - multipass_ssh_public_key_status.stat.exists
+      - multipass_ssh_public_key_status.stat.isreg
+      - multipass_ssh_public_key_status.stat.readable
+    fail_msg: >-
+      Dedicated SSH public key is missing or unreadable.
+      Expected: {{ multipass_ssh_public_key_path }}
+
+- name: Read dedicated SSH public key
+  ansible.builtin.set_fact:
+    multipass_ssh_public_key: >-
+      {{ lookup('ansible.builtin.file', multipass_ssh_public_key_path) | trim }}
+
+- name: Validate SSH public key format
+  ansible.builtin.assert:
+    that:
+      - multipass_ssh_public_key is match('^ssh-ed25519 ')
+    fail_msg: "Expected an ED25519 SSH public key."
+
+- name: Ensure repository-local temporary directory exists
+  ansible.builtin.file:
+    path: "{{ multipass_cloud_init_path | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Generate cloud-init configuration for each VM
+  ansible.builtin.template:
+    src: cloud-init.yaml.j2
+    dest: "{{ multipass_cloud_init_path | regex_replace('\\.yaml$', '') }}-{{ item.name }}.yaml"
+    mode: "0644"
+  loop: "{{ multipass_vm_definitions }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Launch Multipass VMs
+  ansible.builtin.command:
+    argv:
+      - multipass
+      - launch
+      - --name
+      - "{{ item.name }}"
+      - --cpus
+      - "{{ item.cpus | string }}"
+      - --memory
+      - "{{ item.memory }}"
+      - --disk
+      - "{{ item.disk }}"
+      - --cloud-init
+      - "{{ multipass_cloud_init_path | regex_replace('\\.yaml$', '') }}-{{ item.name }}.yaml"
+      - "{{ multipass_image }}"
+  loop: "{{ multipass_vm_definitions }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Wait for cloud-init to complete on each VM
+  ansible.builtin.command:
+    argv:
+      - multipass
+      - exec
+      - "{{ item.name }}"
+      - --
+      - cloud-init
+      - status
+      - --wait
+  loop: "{{ multipass_vm_definitions }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  async: 900
+  poll: 5
+
+- name: Retrieve final Multipass VM list
+  ansible.builtin.command:
+    argv:
+      - multipass
+      - list
+      - --format
+      - json
+  register: multipass_final_list_result
+  changed_when: false
+
+- name: Identify running provisioned VMs
+  ansible.builtin.set_fact:
+    multipass_final_vm_names: >-
+      {{
+        (multipass_final_list_result.stdout | from_json).list
+        | map(attribute='name')
+        | list
+      }}
+    multipass_final_running_vm_names: >-
+      {{
+        (multipass_final_list_result.stdout | from_json).list
+        | selectattr('state', 'equalto', 'Running')
+        | map(attribute='name')
+        | list
+      }}
+
+- name: Verify all expected VMs are running
+  ansible.builtin.assert:
+    that:
+      - >-
+        (multipass_vm_definitions | map(attribute='name') | list)
+        | difference(multipass_final_vm_names) | length == 0
+      - >-
+        (multipass_vm_definitions | map(attribute='name') | list)
+        | difference(multipass_final_running_vm_names) | length == 0
+    fail_msg: "One or more expected Multipass VMs are missing or not running."
+    success_msg: "All four Multipass VMs are running."

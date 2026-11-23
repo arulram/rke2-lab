@@ -1,0 +1,94 @@
+---
+- name: Validate RKE2 cluster health
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+
+  vars_files:
+  - ../group_vars/all.yml
+
+  pre_tasks:
+    - name: Verify expected RKE2 cluster inventory
+      ansible.builtin.assert:
+        that:
+          - groups['rke2_servers'] | length == 1
+          - groups['rke2_agents'] | length == 3
+          - groups['rke2_cluster'] | length == 4
+        fail_msg: >-
+          Cluster validation aborted. Expected one RKE2 server
+          and three RKE2 agents in the inventory.
+
+  tasks:
+    - name: Wait for Kubernetes API
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ rke2_api_port }}"
+        delay: 5
+        timeout: 300
+
+    - name: Verify kubectl binary exists
+      ansible.builtin.stat:
+        path: "{{ rke2_kubectl_path }}"
+      register: rke2_kubectl_status
+
+    - name: Assert kubectl is installed
+      ansible.builtin.assert:
+        that:
+          - rke2_kubectl_status.stat.exists
+          - rke2_kubectl_status.stat.executable
+
+    - name: Wait for all Kubernetes nodes to become Ready
+      ansible.builtin.command:
+        argv:
+          - "{{ rke2_kubectl_path }}"
+          - wait
+          - --for=condition=Ready
+          - nodes
+          - --all
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+      changed_when: false
+
+    - name: Retrieve registered Kubernetes nodes
+      ansible.builtin.command:
+        argv:
+          - "{{ rke2_kubectl_path }}"
+          - get
+          - nodes
+          - --no-headers
+      environment:
+        KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+      register: rke2_nodes_result
+      changed_when: false
+
+    - name: Verify expected number of nodes registered
+      ansible.builtin.assert:
+        that:
+          - rke2_nodes_result.stdout_lines | length == groups['rke2_cluster'] | length
+        fail_msg: >-
+          Expected {{ groups['rke2_cluster'] | length }} nodes,
+          but found {{ rke2_nodes_result.stdout_lines | length }}.
+
+    - name: Display cluster node status
+      ansible.builtin.debug:
+        var: rke2_nodes_result.stdout_lines
+
+    - name: Retrieve Kubernetes system pods
+      ansible.builtin.command:
+        argv:
+          - "{{ rke2_kubectl_path }}"
+          - get
+          - pods
+          - -n
+          - kube-system
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ rke2_server_kubeconfig }}"
+      register: rke2_system_pods_result
+      changed_when: false
+
+    - name: Display Kubernetes system pod status
+      ansible.builtin.debug:
+        var: rke2_system_pods_result.stdout_lines

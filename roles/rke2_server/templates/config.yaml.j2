@@ -1,0 +1,6 @@
+---
+# Dedicated token for worker registration
+agent-token: "{{ rke2_agent_token | trim }}"
+
+# Restrict permissions on the generated kubeconfig
+write-kubeconfig-mode: "0600"
